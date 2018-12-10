@@ -17,6 +17,7 @@ import (
 
 	"github.com/go-kit/kit/log"
 	"github.com/improbable-eng/thanos/pkg/runutil"
+	"github.com/improbable-eng/thanos/pkg/strpool"
 	"github.com/oklog/ulid"
 	"github.com/pkg/errors"
 	"github.com/prometheus/tsdb"
@@ -27,6 +28,9 @@ import (
 
 // IndexCacheFilename is the canonical name for index cache files.
 const IndexCacheFilename = "index.cache.json"
+
+var bytesSaved = 0
+var bytesTotal = 0
 
 type postingsRange struct {
 	Name, Value string
@@ -167,7 +171,7 @@ func WriteIndexCache(logger log.Logger, indexFn string, fn string) error {
 }
 
 // ReadIndexCache reads an index cache file.
-func ReadIndexCache(logger log.Logger, fn string) (
+func ReadIndexCache(stringPool *strpool.StringPool, logger log.Logger, fn string) (
 	version int,
 	symbols map[uint32]string,
 	lvals map[string][]string,
@@ -184,19 +188,29 @@ func ReadIndexCache(logger log.Logger, fn string) (
 	if err := json.NewDecoder(f).Decode(&v); err != nil {
 		return 0, nil, nil, nil, errors.Wrap(err, "decode file")
 	}
-	strs := map[string]string{}
 	lvals = make(map[string][]string, len(v.LabelValues))
 	postings = make(map[labels.Label]index.Range, len(v.Postings))
+	_, globalDedupe := os.LookupEnv("THANOS_GLOBAL_DEDUPE")
+	str := make(map[string]string)
 
 	// Most strings we encounter are duplicates. Dedup string objects that we keep
 	// around after the function returns to reduce total memory usage.
-	// NOTE(fabxc): it could even make sense to deduplicate globally.
+	// We use the global string cache that is shared across the entire bucket.
 	getStr := func(s string) string {
-		if cs, ok := strs[s]; ok {
-			return cs
+		bytesTotal += len(s)
+		if !globalDedupe {
+			if cs, ok := str[s]; ok {
+				bytesSaved += len(s)
+				return cs
+			}
+			str[s] = s
+			return s
 		}
-		strs[s] = s
-		return s
+		cs, ok := stringPool.GetCachedString(s)
+		if ok {
+			bytesSaved += len(s)
+		}
+		return cs
 	}
 
 	for o, s := range v.Symbols {
@@ -215,6 +229,7 @@ func ReadIndexCache(logger log.Logger, fn string) (
 		}
 		postings[l] = index.Range{Start: e.Start, End: e.End}
 	}
+	fmt.Println("global dedupe: ", globalDedupe, "bytes saved: ", bytesSaved, " total: ", bytesTotal)
 	return v.Version, v.Symbols, lvals, postings, nil
 }
 

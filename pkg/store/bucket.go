@@ -25,6 +25,7 @@ import (
 	"github.com/improbable-eng/thanos/pkg/pool"
 	"github.com/improbable-eng/thanos/pkg/runutil"
 	"github.com/improbable-eng/thanos/pkg/store/storepb"
+	"github.com/improbable-eng/thanos/pkg/strpool"
 	"github.com/improbable-eng/thanos/pkg/strutil"
 	"github.com/improbable-eng/thanos/pkg/tracing"
 	"github.com/oklog/run"
@@ -159,6 +160,7 @@ type BucketStore struct {
 	metrics    *bucketStoreMetrics
 	bucket     objstore.BucketReader
 	dir        string
+	stringPool *strpool.StringPool
 	indexCache *indexCache
 	chunkPool  *pool.BytesPool
 
@@ -200,6 +202,7 @@ func NewBucketStore(
 		logger:               logger,
 		bucket:               bucket,
 		dir:                  dir,
+		stringPool:           strpool.NewStringPool(),
 		indexCache:           indexCache,
 		chunkPool:            chunkPool,
 		blocks:               map[ulid.ULID]*bucketBlock{},
@@ -350,6 +353,7 @@ func (s *BucketStore) addBlock(ctx context.Context, id ulid.ULID) (err error) {
 		s.bucket,
 		id,
 		dir,
+		s.stringPool,
 		s.indexCache,
 		s.chunkPool,
 	)
@@ -987,6 +991,7 @@ func newBucketBlock(
 	bkt objstore.BucketReader,
 	id ulid.ULID,
 	dir string,
+	stringPool *strpool.StringPool,
 	indexCache *indexCache,
 	chunkPool *pool.BytesPool,
 ) (b *bucketBlock, err error) {
@@ -1001,7 +1006,7 @@ func newBucketBlock(
 	if err = b.loadMeta(ctx, id); err != nil {
 		return nil, errors.Wrap(err, "load meta")
 	}
-	if err = b.loadIndexCache(ctx); err != nil {
+	if err = b.loadIndexCache(ctx, stringPool); err != nil {
 		return nil, errors.Wrap(err, "load index cache")
 	}
 	// Get object handles for all chunk files.
@@ -1037,10 +1042,10 @@ func (b *bucketBlock) loadMeta(ctx context.Context, id ulid.ULID) error {
 	return nil
 }
 
-func (b *bucketBlock) loadIndexCache(ctx context.Context) (err error) {
+func (b *bucketBlock) loadIndexCache(ctx context.Context, stringPool *strpool.StringPool) (err error) {
 	cachefn := filepath.Join(b.dir, block.IndexCacheFilename)
 
-	b.indexVersion, b.symbols, b.lvals, b.postings, err = block.ReadIndexCache(b.logger, cachefn)
+	b.indexVersion, b.symbols, b.lvals, b.postings, err = block.ReadIndexCache(stringPool, b.logger, cachefn)
 	if err == nil {
 		return nil
 	}
@@ -1063,7 +1068,7 @@ func (b *bucketBlock) loadIndexCache(ctx context.Context) (err error) {
 		return errors.Wrap(err, "write index cache")
 	}
 
-	b.indexVersion, b.symbols, b.lvals, b.postings, err = block.ReadIndexCache(b.logger, cachefn)
+	b.indexVersion, b.symbols, b.lvals, b.postings, err = block.ReadIndexCache(stringPool, b.logger, cachefn)
 	if err != nil {
 		return errors.Wrap(err, "read index cache")
 	}
