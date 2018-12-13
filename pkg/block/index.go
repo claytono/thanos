@@ -6,9 +6,11 @@ import (
 	"hash/crc32"
 	"math/rand"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/improbable-eng/thanos/pkg/block/metadata"
@@ -29,6 +31,7 @@ import (
 // IndexCacheFilename is the canonical name for index cache files.
 const IndexCacheFilename = "index.cache.json"
 
+var statsMutex = sync.Mutex{}
 var bytesSaved = 0
 var bytesTotal = 0
 
@@ -170,6 +173,12 @@ func WriteIndexCache(logger log.Logger, indexFn string, fn string) error {
 	return nil
 }
 
+func timeTrack(start, end time.Time, name string, fn string) {
+	elapsed := end.Sub(start)
+	chunk := path.Base(path.Dir(fn))
+	fmt.Printf("%s: %s took %s\n", chunk, name, elapsed)
+}
+
 // ReadIndexCache reads an index cache file.
 func ReadIndexCache(stringPool *strpool.StringPool, logger log.Logger, fn string) (
 	version int,
@@ -178,6 +187,7 @@ func ReadIndexCache(stringPool *strpool.StringPool, logger log.Logger, fn string
 	postings map[labels.Label]index.Range,
 	err error,
 ) {
+	ioStart := time.Now()
 	f, err := os.Open(fn)
 	if err != nil {
 		return 0, nil, nil, nil, errors.Wrap(err, "open file")
@@ -197,7 +207,6 @@ func ReadIndexCache(stringPool *strpool.StringPool, logger log.Logger, fn string
 	// around after the function returns to reduce total memory usage.
 	// We use the global string cache that is shared across the entire bucket.
 	getStr := func(s string) string {
-		bytesTotal += len(s)
 		if !globalDedupe {
 			if cs, ok := str[s]; ok {
 				bytesSaved += len(s)
@@ -207,12 +216,19 @@ func ReadIndexCache(stringPool *strpool.StringPool, logger log.Logger, fn string
 			return s
 		}
 		cs, ok := stringPool.GetCachedString(s)
+		statsMutex.Lock()
+		defer statsMutex.Unlock()
+		bytesTotal += len(s)
 		if ok {
 			bytesSaved += len(s)
 		}
 		return cs
 	}
 
+	lockwaitStart := time.Now()
+	stringPool.Lock()
+	defer stringPool.Unlock()
+	loadStart := time.Now()
 	for o, s := range v.Symbols {
 		v.Symbols[o] = getStr(s)
 	}
@@ -229,6 +245,10 @@ func ReadIndexCache(stringPool *strpool.StringPool, logger log.Logger, fn string
 		}
 		postings[l] = index.Range{Start: e.Start, End: e.End}
 	}
+
+	timeTrack(ioStart, loadStart, "io ", fn)
+	timeTrack(lockwaitStart, loadStart, "lockwait ", fn)
+	timeTrack(loadStart, time.Now(), "load ", fn)
 	fmt.Println("global dedupe: ", globalDedupe, "bytes saved: ", bytesSaved, " total: ", bytesTotal)
 	return v.Version, v.Symbols, lvals, postings, nil
 }
