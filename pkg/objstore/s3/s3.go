@@ -35,6 +35,7 @@ const DirDelim = "/"
 // Config stores the configuration for s3 bucket.
 type Config struct {
 	Bucket        string     `yaml:"bucket"`
+	Prefix        *string    `yaml:"prefix"`
 	Endpoint      string     `yaml:"endpoint"`
 	AccessKey     string     `yaml:"access_key"`
 	Insecure      bool       `yaml:"insecure"`
@@ -53,6 +54,7 @@ type HTTPConfig struct {
 type Bucket struct {
 	logger log.Logger
 	name   string
+	prefix *string
 	client *minio.Client
 	sse    encrypt.ServerSide
 }
@@ -77,7 +79,7 @@ func NewBucket(logger log.Logger, conf []byte, component string) (*Bucket, error
 	return NewBucketWithConfig(logger, config, component)
 }
 
-// NewBucket returns a new Bucket using the provided s3 config values.
+// NewBucketWithConfig returns a new Bucket using the provided s3 config values.
 func NewBucketWithConfig(logger log.Logger, config Config, component string) (*Bucket, error) {
 	var chain []credentials.Provider
 
@@ -149,6 +151,10 @@ func NewBucketWithConfig(logger log.Logger, config Config, component string) (*B
 		client: client,
 		sse:    sse,
 	}
+	if config.Prefix != nil {
+		prefix := strings.TrimSuffix(*config.Prefix, DirDelim) + DirDelim
+		bkt.prefix = &prefix
+	}
 	return bkt, nil
 }
 
@@ -182,6 +188,7 @@ func ValidateForTests(conf Config) error {
 func (b *Bucket) Iter(ctx context.Context, dir string, f func(string) error) error {
 	// Ensure the object name actually ends with a dir suffix. Otherwise we'll just iterate the
 	// object itself as one prefix item.
+	dir = b.withPrefix(dir)
 	if dir != "" {
 		dir = strings.TrimSuffix(dir, DirDelim) + DirDelim
 	}
@@ -195,7 +202,7 @@ func (b *Bucket) Iter(ctx context.Context, dir string, f func(string) error) err
 		if object.Key == "" {
 			continue
 		}
-		if err := f(object.Key); err != nil {
+		if err := f(b.withoutPrefix(object.Key)); err != nil {
 			return err
 		}
 	}
@@ -210,7 +217,7 @@ func (b *Bucket) getRange(ctx context.Context, name string, off, length int64) (
 			return nil, err
 		}
 	}
-	r, err := b.client.GetObjectWithContext(ctx, b.name, name, *opts)
+	r, err := b.client.GetObjectWithContext(ctx, b.name, b.withPrefix(name), *opts)
 	if err != nil {
 		return nil, err
 	}
@@ -239,7 +246,7 @@ func (b *Bucket) GetRange(ctx context.Context, name string, off, length int64) (
 
 // Exists checks if the given object exists.
 func (b *Bucket) Exists(ctx context.Context, name string) (bool, error) {
-	_, err := b.client.StatObject(b.name, name, minio.StatObjectOptions{})
+	_, err := b.client.StatObject(b.name, b.withPrefix(name), minio.StatObjectOptions{})
 	if err != nil {
 		if b.IsObjNotFoundErr(err) {
 			return false, nil
@@ -261,7 +268,7 @@ func (b *Bucket) Upload(ctx context.Context, name string, r io.Reader) error {
 		fileSize = fileInfo.Size()
 	}
 
-	_, err = b.client.PutObjectWithContext(ctx, b.name, name, r, fileSize,
+	_, err = b.client.PutObjectWithContext(ctx, b.name, b.withPrefix(name), r, fileSize,
 		minio.PutObjectOptions{ServerSideEncryption: b.sse, UserMetadata: map[string]string{"X-Amz-Acl": "bucket-owner-full-control"}},
 	)
 
@@ -270,12 +277,26 @@ func (b *Bucket) Upload(ctx context.Context, name string, r io.Reader) error {
 
 // Delete removes the object with the given name.
 func (b *Bucket) Delete(ctx context.Context, name string) error {
-	return b.client.RemoveObject(b.name, name)
+	return b.client.RemoveObject(b.name, b.withPrefix(name))
 }
 
 // IsObjNotFoundErr returns true if error means that object is not found. Relevant to Get operations.
 func (b *Bucket) IsObjNotFoundErr(err error) bool {
 	return minio.ToErrorResponse(err).Code == "NoSuchKey"
+}
+
+func (b *Bucket) withPrefix(name string) string {
+	if b.prefix != nil {
+		return *b.prefix + name
+	}
+	return name
+}
+
+func (b *Bucket) withoutPrefix(name string) string {
+	if b.prefix != nil {
+		return strings.TrimPrefix(name, *b.prefix)
+	}
+	return name
 }
 
 func (b *Bucket) Close() error { return nil }
@@ -286,6 +307,11 @@ func configFromEnv() Config {
 		Endpoint:  os.Getenv("S3_ENDPOINT"),
 		AccessKey: os.Getenv("S3_ACCESS_KEY"),
 		SecretKey: os.Getenv("S3_SECRET_KEY"),
+	}
+
+	if prefix, ok := os.LookupEnv("S3_PREFIX"); ok {
+		prefix = strings.TrimSuffix(prefix, DirDelim) + DirDelim
+		c.Prefix = &prefix
 	}
 
 	c.Insecure, _ = strconv.ParseBool(os.Getenv("S3_INSECURE"))
