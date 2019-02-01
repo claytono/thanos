@@ -207,6 +207,10 @@ func ReadIndexCache(stringPool *strpool.StringPool, logger log.Logger, fn string
 	// around after the function returns to reduce total memory usage.
 	// We use the global string cache that is shared across the entire bucket.
 	getStr := func(s string) string {
+		statsMutex.Lock()
+		defer statsMutex.Unlock()
+
+		bytesTotal += len(s)
 		if !globalDedupe {
 			if cs, ok := str[s]; ok {
 				bytesSaved += len(s)
@@ -216,9 +220,6 @@ func ReadIndexCache(stringPool *strpool.StringPool, logger log.Logger, fn string
 			return s
 		}
 		cs, ok := stringPool.GetCachedString(s)
-		statsMutex.Lock()
-		defer statsMutex.Unlock()
-		bytesTotal += len(s)
 		if ok {
 			bytesSaved += len(s)
 		}

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -233,6 +234,20 @@ func (s *BucketStore) Close() (err error) {
 	return err
 }
 
+func printMemUsage() {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	// For info on each, see: https://golang.org/pkg/runtime/#MemStats
+	fmt.Printf("Alloc = %v MiB", bToMb(m.Alloc))
+	fmt.Printf("\tTotalAlloc = %v MiB", bToMb(m.TotalAlloc))
+	fmt.Printf("\tSys = %v MiB", bToMb(m.Sys))
+	fmt.Printf("\tNumGC = %v\n", m.NumGC)
+}
+
+func bToMb(b uint64) uint64 {
+	return b / 1024 / 1024
+}
+
 // SyncBlocks synchronizes the stores state with the Bucket bucket.
 // It will reuse disk space as persistent cache based on s.dir param.
 func (s *BucketStore) SyncBlocks(ctx context.Context) error {
@@ -243,9 +258,11 @@ func (s *BucketStore) SyncBlocks(ctx context.Context) error {
 		wg.Add(1)
 		go func() {
 			for id := range blockc {
-				if err := s.addBlock(ctx, id); err != nil {
-					level.Warn(s.logger).Log("msg", "loading block failed", "id", id, "err", err)
-					continue
+				if id.Time()%5 == 0 {
+					if err := s.addBlock(ctx, id); err != nil {
+						level.Warn(s.logger).Log("msg", "loading block failed", "id", id, "err", err)
+						continue
+					}
 				}
 			}
 			wg.Done()
@@ -290,6 +307,11 @@ func (s *BucketStore) SyncBlocks(ctx context.Context) error {
 		s.metrics.blockDrops.Inc()
 	}
 
+	printMemUsage()
+	runtime.GC()
+	printMemUsage()
+
+	os.Exit(0)
 	return nil
 }
 

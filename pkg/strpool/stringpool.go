@@ -1,6 +1,8 @@
 package strpool
 
-import "sync"
+import (
+	"sync"
+)
 
 // StringPool is used to keep a shared reference to strings that are expected
 // to be shared across an instance of the thanos store.  This is mostly used to
